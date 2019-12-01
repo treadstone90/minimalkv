@@ -2,47 +2,54 @@ package com.treadstone90.mkvstore
 
 import java.security.SecureRandom
 import java.util
-import java.util.Base64
 
 import scala.util.Random
-
-// write a KV store with memtable and Ss table implementation
-// and a simple WAL.
 
 object Main extends Utils {
   val random = new SecureRandom()
 
-  def generateNeedle(): Needle = {
-    val k1 = new Array[Byte](16);
-    random.nextBytes(k1)
+  def generateValue()  = {
     val valueSize = random.nextInt(1024*1024)
     val value = new Array[Byte](valueSize)
     random.nextBytes(value)
-    Needle(k1, valueSize, value)
+    Needle(valueSize, value)
+  }
+
+  def randomInt: Int = {
+    random.nextInt(1024*1024)
+  }
+
+  def randomLong: Long = {
+    random.nextLong()
+  }
+
+  def randomString: String = {
+    val bytes = new Array[Byte](5)
+    random.nextBytes(bytes)
+    new String(bytes)
   }
 
   def main(args: Array[String]): Unit = {
-    val store = new KVStoreImpl(new SSTableManagerImpl("/tmp/blockStore"))
-    val needles = (0 to 200).flatMap { i =>
-      val needle = generateNeedle()
-      if ( needle.size > 0) {
-        time(i.toString) {
-          store.write(needle)
-        }
-        assert(util.Arrays.equals(store.get(needle.key).get.data, needle.data))
-        Some(needle)
-      } else {
-        None
-      }
-    }
-    val randomShuffles = Random.shuffle(needles)
+    val store = KVStore.apply[Long]("/tmp/blockStore")
 
+    val keyValues = (0 to 200).map { i =>
+      val key = randomInt
+      val value = generateValue()
+      time("Writes " + key.toString) {
+        store.put(key, value)
+      }
+      assert(util.Arrays.equals(store.get(key).get.data, value.data))
+      (key, value)
+    }
+
+    val randomShuffles = Random.shuffle(keyValues)
     time("Reads") {
       randomShuffles.foreach { needle =>
-        val readData = time(Base64.getUrlEncoder.encodeToString(needle.key)) {
-          store.get(needle.key).get.data
+        println(s"GOing to shuffle read mode for ${needle._1}")
+        val readData = time(needle._1.toString) {
+          store.get(needle._1).get.data
         }
-        assert(util.Arrays.equals(readData, needle.data))
+        assert(util.Arrays.equals(readData, needle._2.data))
       }
     }
   }

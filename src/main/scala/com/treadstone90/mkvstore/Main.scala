@@ -3,16 +3,27 @@ package com.treadstone90.mkvstore
 import java.security.SecureRandom
 import java.util
 
+import com.twitter.util.Stopwatch
+
 import scala.util.Random
 
-object Main extends Utils {
+object Main {
+
+  def time[T](label: String)(f: => T): T = {
+    val elapsed = Stopwatch.start()
+    val result: T = f
+    val end = elapsed()
+    println(s"[$label] took $end")
+    result
+  }
+
   val random = new SecureRandom()
 
-  def generateValue()  = {
+  def generateValue(): Array[Byte]  = {
     val valueSize = random.nextInt(1024*1024)
     val value = new Array[Byte](valueSize)
     random.nextBytes(value)
-    Needle(valueSize, value)
+    value
   }
 
   def randomInt: Int = {
@@ -30,27 +41,48 @@ object Main extends Utils {
   }
 
   def main(args: Array[String]): Unit = {
-    val store = KVStore.apply[Long]("/tmp/blockStore")
+    val store = KVStore.open[Int]("/tmp/blockStore")
+    var deletedKeys = Seq.empty[Int]
 
-    val keyValues = (0 to 200).map { i =>
+    val keyValues = (0 to 500).map { i =>
       val key = randomInt
       val value = generateValue()
       time("Writes " + key.toString) {
-        store.put(key, value)
+        store.write(key, value)
       }
-      assert(util.Arrays.equals(store.get(key).get.data, value.data))
+      assert(util.Arrays.equals(store.get(key), value))
       (key, value)
     }
 
-    val randomShuffles = Random.shuffle(keyValues)
+    deletedKeys = Random.shuffle(keyValues).take(250).map(_._1)
+    val retainedKeys = Random.shuffle(keyValues).takeRight(250)
+
     time("Reads") {
-      randomShuffles.foreach { needle =>
+      retainedKeys.foreach { needle =>
         println(s"GOing to shuffle read mode for ${needle._1}")
         val readData = time(needle._1.toString) {
-          store.get(needle._1).get.data
+          store.get(needle._1)
         }
-        assert(util.Arrays.equals(readData, needle._2.data))
+        assert(util.Arrays.equals(readData, needle._2))
       }
     }
+
+    time("Deletes") {
+      deletedKeys.foreach { key =>
+        store.delete(key)
+        assert(store.get(key).isEmpty)
+      }
+    }
+
+    val key = randomInt
+    val value = generateValue()
+    val op1 = PutOperation(key, value)
+    val op2 = DeleteOperation(key)
+
+    store.writeBatch(WriteBatch(op1, op2))
+
+    assert(store.get(key).isEmpty)
+
+    KVStore.close(store)
   }
 }

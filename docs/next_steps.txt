@@ -1,0 +1,22 @@
+Create a HTTP server with get and put api. How do you plan to store arbitrary byte arrays ? Base4 encode ?
+Thrift makes a lot of sense here. But we also want to practice creating a HTTO server. So lets
+store a JSON Key value store.
+
+yeah key is a String and value is a json blob.
+And just expose thiss ?
+
+Can we use an arbit key type ?
+Like a long or an int. Hmm Then we need a way to take a type and then store in the KV store.
+Well lets do that ?
+
+Okay then our request is
+
+KVRequest(key: String, value: String)
+
+so value is a json.
+and the key is base64 encoded.
+The type determines how to use decode key.
+
+KVResposnse(key: Array[Bytes], value: String)
+
+actually lets just store JSOn and see where this takes us.

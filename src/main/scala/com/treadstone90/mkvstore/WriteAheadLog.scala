@@ -1,8 +1,7 @@
 package com.treadstone90.mkvstore
 
-import java.io.{DataOutputStream, FileOutputStream}
-import java.nio.ByteBuffer
-import java.util.zip.CRC32
+import java.io.{Closeable, RandomAccessFile}
+import java.nio.file.{FileSystems, Files, StandardCopyOption}
 
 /**
  * write ahead log. append some log entries.
@@ -10,97 +9,75 @@ import java.util.zip.CRC32
  * and sequence number is imporant
  * Don't worry about the effficiency yet.
  * so pack key | sequence_number | type | value into the WAL format.
- * So firtly we'll make sure that we are able to write to the log.
+ * So firstly we'll make sure that we are able to write to the log.
  * Then we can change the log format.
  */
 
 trait WriteAheadLog {
   def appendEntry(logEntry: LogEntry)
+  def getLogStream: LogEntryIterator
+  def rolloverFile(): Unit
+  def appendEntries(logEntry: Seq[LogEntry])
 }
 
-class WriteAheadLogImpl(dbPath: String) extends WriteAheadLog {
-  private val dataOutputStream = new DataOutputStream(new FileOutputStream(s"$dbPath/LOG.current"))
+class WriteAheadLogImpl[T](dbPath: String,
+                           val sliceable: Sliceable[T])
+  extends WriteAheadLog with LogEntryUtils with Closeable {
+  val currentLogFileName = s"$dbPath/LOG.current"
+  val rolledLogFileName = s"$dbPath/LOG.old"
+  val newLogFileName = s"$dbPath/LOG.new"
+  private var dataOutputStream = new RandomAccessFile(currentLogFileName, "rwd")
+  dataOutputStream.seek(dataOutputStream.length())
 
   def appendEntry(logEntry: LogEntry): Unit = {
-    // create one ByteBuffer and write once instead of doing this.
-    val record = logEntry.serializeToBytes
-    dataOutputStream.writeInt(record.size)
-    dataOutputStream.writeLong(record.checkSum)
-    dataOutputStream.write(record.data)
+    val record = logEntry.makeRecord
+    dataOutputStream.write(serializeRecord(record))
+  }
+
+  def appendEntries(logEntries: Seq[LogEntry]): Unit = {
+    val bytes = serializeRecords(logEntries.map(_.makeRecord))
+    dataOutputStream.write(bytes)
   }
 
   def close(): Unit = {
     dataOutputStream.close()
   }
-}
 
-case class Record(size: Int, checkSum:Long, data: Array[Byte])
+  def rolloverFile(): Unit = {
+    val oldWAL = dataOutputStream
+    Files.createFile(FileSystems.getDefault.getPath(newLogFileName))
+    dataOutputStream = new RandomAccessFile(newLogFileName, "rwd")
+    oldWAL.close()
 
-sealed trait LogEntry {
-  def keySize: Int
-  def key: Array[Byte]
-  def sequenceId: Long
-  def operationType: OperationType
-  def valueSize: Int
-  val logEntrySize: Int
 
-  def writeValue(buffer: ByteBuffer): Unit = {}
+    // This can happen async
+    Files.move(FileSystems.getDefault.getPath(currentLogFileName),
+      FileSystems.getDefault.getPath(rolledLogFileName), StandardCopyOption.ATOMIC_MOVE)
 
-  def serializeToBytes: Record = {
-    val buf = ByteBuffer.allocate(logEntrySize)
-    buf.putInt(keySize)
-    buf.put(key)
-    buf.putLong(sequenceId)
-    buf.putInt(operationType.ordinal())
-    writeValue(buf)
-    val crc = new CRC32()
-    crc.update(buf)
+    Files.move(FileSystems.getDefault.getPath(newLogFileName),
+      FileSystems.getDefault.getPath(currentLogFileName), StandardCopyOption.ATOMIC_MOVE)
 
-    Record(logEntrySize, crc.getValue, buf.array())
+
+    Files.delete(FileSystems.getDefault.getPath(rolledLogFileName))
+  }
+
+  def getLogStream: LogEntryIterator = {
+    new LogEntryIterator(dbPath)
   }
 }
 
-case class WriteLogEntry(keySize: Int, key: Array[Byte], sequenceId: Long, valueSize: Int, value: Array[Byte])
-  extends LogEntry {
+class LogEntryIterator(dbPath: String) extends Iterator[LogEntry] with LogEntryUtils {
+  private val dis = new RandomAccessFile(s"$dbPath/LOG.current" , "r")
+  var lastKnownSequenceId: Option[Long] = None
 
-  override def writeValue(buffer: ByteBuffer): Unit = {
-    buffer.putInt(valueSize)
-    buffer.put(value)
+  def hasNext: Boolean = {
+    dis.getFilePointer < dis.length()
   }
 
-  val logEntrySize: Int = {
-    // size of internalKey | key + sequenceId | operationType | valueSize | value
-    4 + keySize + 8 + 4 +  4 + valueSize
-  }
-
-  val operationType: OperationType = OperationType.VALUE_OP
-}
-
-case class DeleteLogEntry(keySize: Int, key: Array[Byte], sequenceId: Long) extends LogEntry {
-  val valueSize = 0
-  val operationType: OperationType = OperationType.DELETE_OP
-
-  val logEntrySize: Int = {
-    // size of internalKey | key + sequenceId | operationType | valueSize | value
-    4 + keySize + 8 + 4
-  }
-}
-
-object LogEntry {
-  def deserializeFromRecord(record: Record): LogEntry = {
-    val byteBuffer = ByteBuffer.wrap(record.data)
-    val keySize = byteBuffer.getInt
-    val keyByteArray = new Array[Byte](keySize)
-    byteBuffer.get(keyByteArray)
-    val sequenceId = byteBuffer.getLong
-    val operationType = OperationType.fromInteger(byteBuffer.getInt())
-    operationType match {
-      case OperationType.DELETE_OP => DeleteLogEntry(keySize, keyByteArray, sequenceId)
-      case OperationType.VALUE_OP =>
-        val valueSize = byteBuffer.getInt
-        val valueByteArray = new Array[Byte](valueSize)
-        byteBuffer.get(valueByteArray)
-        WriteLogEntry(keySize, keyByteArray, sequenceId, valueSize, valueByteArray)
-    }
+  def next(): LogEntry = {
+    val record = readRecord(dis)
+    val logEntry = LogEntry.deserializeFromRecord(record)
+    lastKnownSequenceId = Some(logEntry.sequenceId)
+    logEntry
   }
 }

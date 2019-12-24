@@ -6,23 +6,26 @@ import java.util.concurrent.ConcurrentSkipListMap
 
 import com.google.common.hash.BloomFilter
 
-// so we need to know what an SSTable is
-//
-trait SSTable[T] {
+trait SSTable[T] extends AutoCloseable {
   /**
    * Check if key exists in an SSTable
    * @param key Key
    * @return Option of Needle.
    */
   def get(key: T): Option[LogEntry]
+
+  def iterator: Iterator[LogEntry]
+
+  def bloomFilter: BloomFilter[T]
 }
 
 case class Header[T](bloomFilter: BloomFilter[T], segmentId: Int)
 
-class SSTableImpl[T](val skipList: ConcurrentSkipListMap[T, SSTableEntryMeta],
+class SSTableImpl[T](val skipList: ConcurrentSkipListMap[T, RecordEntryMeta],
                      segmentId: Int,
-                     bloomFilter: BloomFilter[T],
+                     val bloomFilter: BloomFilter[T],
                      sliceable: Sliceable[T],
+                     ssTableFile: String,
                      readRandomAccessFile: RandomAccessFile) extends SSTable[T] {
 
   def get(key: T): Option[LogEntry] = {
@@ -34,28 +37,32 @@ class SSTableImpl[T](val skipList: ConcurrentSkipListMap[T, SSTableEntryMeta],
     }
   }
 
+  def iterator: Iterator[LogEntry] = {
+    new SSTableIterator[T](new RandomAccessFile(ssTableFile, "r"), sliceable)
+  }
+
   def close(): Unit = {
     readRandomAccessFile.close()
   }
 
-  private def checkInSSTable(key: T): Option[SSTableEntryMeta] = {
+  private def checkInSSTable(key: T): Option[RecordEntryMeta] = {
     val lastEntry = skipList.lastEntry()
     val smallerEntry = Option(skipList.floorEntry(key))
+
+    println(s"For key $key, smaller is ${smallerEntry.map(_.getKey)} and last is ${lastEntry.getKey}")
 
     smallerEntry match {
       case None => None
       case Some(e) if e.getKey == key =>
         println(s"Exact match found for for $key")
         Some(e.getValue)
-      case Some(e) if e.getKey == lastEntry.getKey =>
-        None
       case Some(e) =>
         println(s"approx match found for  $key")
         Some(e.getValue)
     }
   }
 
-  private def readFromFile(key: T, ssTableMeta: SSTableEntryMeta): Option[LogEntry] = {
+  private def readFromFile(key: T, ssTableMeta: RecordEntryMeta): Option[LogEntry] = {
     var needleOpt: Option[LogEntry] = None
     var canStop = false
     readRandomAccessFile.seek(ssTableMeta.offset)
@@ -78,8 +85,26 @@ class SSTableImpl[T](val skipList: ConcurrentSkipListMap[T, SSTableEntryMeta],
         canStop = true
       }
     }
-
     needleOpt
+  }
+}
+
+class SSTableIterator[T](randomAccessFile: RandomAccessFile,
+                         val sliceable: Sliceable[T]) extends Iterator[LogEntry] with SstUtils[T]
+  with LogEntryUtils {
+  val header: Header[T] = readHeader(randomAccessFile)
+
+   def hasNext: Boolean = {
+     randomAccessFile.getFilePointer < randomAccessFile.length()
+   }
+
+   def next(): LogEntry = {
+     val record = readRecord(randomAccessFile)
+     LogEntry.deserializeFromRecord(record)
+   }
+
+  def close(): Unit = {
+    randomAccessFile.close()
   }
 }
 
@@ -90,5 +115,3 @@ object SSTable {
     SegmentIdBytes + BloomFilterLengthBytes + bloomFilterSize
   }
 }
-
-

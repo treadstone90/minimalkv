@@ -4,6 +4,7 @@ import com.google.common.eventbus.EventBus
 import com.google.common.net.HostAndPort
 import com.google.inject.{Provides, Singleton}
 import com.twitter.app.Flag
+import com.twitter.finagle.util.DefaultTimer
 import com.twitter.finatra.json.FinatraObjectMapper
 import com.twitter.inject.TwitterModule
 
@@ -39,7 +40,7 @@ object RaftStateModule extends TwitterModule {
   @Provides
   @Singleton
   def provideRaftState(): RaftState = {
-    new RaftStateImpl(replicas(), ???, processId(), raftStatePath())
+    new RaftStateImpl(replicas(), processId(), raftStatePath())
   }
 
 
@@ -61,8 +62,9 @@ object RaftStateModule extends TwitterModule {
     val leaderSettings  = LeaderSettings(heartbeatIntervalMillis())
     val followerSettings = FollowerSettings(electionTimeoutMillis())
     val candidateSettings = CandidateSettings(electionTimeoutMillis())
+    val memoryWAL = new MemoryWAL
     val actorFactoryImpl = new ActorFactoryImpl(raftState, eventBus, raftClients, leaderSettings, followerSettings,
-      candidateSettings, ???, ???)
+      candidateSettings, memoryWAL, new Tracker(raftState, raftClients, DefaultTimer, memoryWAL))
     val stateManager = new StateManagerImpl(actorFactoryImpl)
     eventBus.register(stateManager)
     stateManager

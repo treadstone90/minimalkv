@@ -24,7 +24,9 @@ class CandidateActor(eventBus: EventBus,
 
   def initiateElection(): Option[TimerTask] = {
     val currentTerm = raftState.incrementTerm()
-    val requestVoteRequest = RequestVoteRequest(currentTerm, raftState.processId, -1, -1)
+    val walLastIndex = writeAheadLog.length - 1
+    val requestVoteRequest = RequestVoteRequest(currentTerm, raftState.processId,
+      walLastIndex, writeAheadLog.get(walLastIndex).get.term)
     val requestVoteResponse = raftClients.map(_._2.requestVote(requestVoteRequest))
     val responses = Await.result(Future.collectToTry(requestVoteResponse.toSeq))
     val (success, failures) = responses.partition(_.isReturn)
@@ -85,7 +87,7 @@ class CandidateActor(eventBus: EventBus,
         RequestVoteResponse(term, false)
       case (true, Some((term, candidateId))) =>
         // the candidate term is greater than or equal to current term.
-        if(requestVoteRequest.lastLogTerm > term || requestVoteRequest.lastLogIndex > writeAheadLog.length) {
+        if(requestVoteRequest.lastLogTerm > term || requestVoteRequest.lastLogIndex >= writeAheadLog.length - 1) {
           val response = RequestVoteResponse(requestVoteRequest.term, true)
           info(s"Term has been updated and hence vote is granted")
           eventBus.post(TransitionStateRequest(Follower))

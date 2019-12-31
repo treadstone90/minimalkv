@@ -40,8 +40,17 @@ class FollowerActor(eventBus: EventBus,
       case (true, _) =>
         info(s"Term from AppendRPC is valid.")
         if(appendEntriesRequest.entries.isEmpty) {
-          raftState.commitIndex = appendEntriesRequest.leaderCommitIndex
-          AppendEntriesResponse(appendEntriesRequest.leaderTerm, true, raftState.processId)
+          // it is hearbeat event
+          if(appendEntriesRequest.leaderCommitIndex > raftState.commitIndex) {
+            raftState.commitIndex = appendEntriesRequest.leaderCommitIndex
+          }
+
+          if(appendEntriesRequest.prevLogMeta.flatMap(meta => writeAheadLog.get(meta.index))
+            .exists(_.term != appendEntriesRequest.leaderTerm)) {
+            AppendEntriesResponse(raftState.currentTerm.get, false, raftState.processId)
+          } else {
+            AppendEntriesResponse(appendEntriesRequest.leaderTerm, true, raftState.processId)
+          }
         } else {
           handleAppendEntriesEvent(appendEntriesRequest)
         }

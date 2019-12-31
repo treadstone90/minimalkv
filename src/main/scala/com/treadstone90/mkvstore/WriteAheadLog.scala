@@ -2,6 +2,7 @@ package com.treadstone90.mkvstore
 
 import java.io.{Closeable, RandomAccessFile}
 import java.nio.file.{FileSystems, Files, StandardCopyOption}
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * write ahead log. append some log entries.
@@ -13,29 +14,43 @@ import java.nio.file.{FileSystems, Files, StandardCopyOption}
  * Then we can change the log format.
  */
 
-trait WriteAheadLog {
-  def appendEntry(logEntry: LogEntry)
-  def getLogStream: LogEntryIterator
+trait WriteAheadLog[L] {
+  def appendEntry(logEntry: L): Long
+  def getLogStream: Iterator[L]
   def rolloverFile(): Unit
-  def appendEntries(logEntry: Seq[LogEntry])
+  def appendEntries(logEntry: Seq[L])
+  // This is the last sequenceId available in the log.
+  def slice(startIndex: Long, endIndex: Long): Iterator[L]
+  def get(index: Long): Option[L]
+  def truncate(index: Long): Unit
+  def length: Long
+}
+
+trait PersistentWriteAheadLog[L] extends WriteAheadLog[L] {
+  def serializer: L => Record
+  def deserializer: Record => L
 }
 
 class WriteAheadLogImpl[T](dbPath: String,
                            val sliceable: Sliceable[T])
-  extends WriteAheadLog with LogEntryUtils with Closeable {
+  extends PersistentWriteAheadLog[LogEntry] with LogEntryUtils with Closeable {
   val currentLogFileName = s"$dbPath/LOG.current"
   val rolledLogFileName = s"$dbPath/LOG.old"
   val newLogFileName = s"$dbPath/LOG.new"
   private var dataOutputStream = new RandomAccessFile(currentLogFileName, "rwd")
   dataOutputStream.seek(dataOutputStream.length())
+  var index = new AtomicLong(0)
+  val serializer: LogEntry => Record = LogEntry.serializeLogEntry
+  val deserializer: Record => LogEntry = LogEntry.deserializeFromRecord
 
-  def appendEntry(logEntry: LogEntry): Unit = {
-    val record = logEntry.makeRecord
+  def appendEntry(logEntry: LogEntry): Long = {
+    val record = serializer(logEntry)
     dataOutputStream.write(serializeRecord(record))
+    index.incrementAndGet()
   }
 
   def appendEntries(logEntries: Seq[LogEntry]): Unit = {
-    val bytes = serializeRecords(logEntries.map(_.makeRecord))
+    val bytes = serializeRecords(logEntries.map(serializer))
     dataOutputStream.write(bytes)
   }
 
@@ -61,8 +76,34 @@ class WriteAheadLogImpl[T](dbPath: String,
     Files.delete(FileSystems.getDefault.getPath(rolledLogFileName))
   }
 
-  def getLogStream: LogEntryIterator = {
+  def getLogStream: Iterator[LogEntry] = {
     new LogEntryIterator(dbPath)
+  }
+
+  def slice(startIndex: Long, endIndex: Long): Iterator[LogEntry] = new WALRangeIterator(dbPath, startIndex, endIndex)
+
+  def get(index: Long): Option[LogEntry] = Option(new WALRangeIterator(dbPath, index, index).next())
+
+  def length: Long = dataOutputStream.length()
+
+  def truncate(index: Long): Unit = ???
+}
+
+class WALRangeIterator(dbPath: String, startIndex: Long, endIndex: Long) extends Iterator[LogEntry] with LogEntryUtils {
+  private val dis = new RandomAccessFile(s"$dbPath/LOG.current" , "r")
+  var lastKnownSequenceId: Option[Long] = None
+  dis.seek(startIndex)
+
+  def hasNext: Boolean = {
+    val filePointer = dis.getFilePointer
+    filePointer < endIndex && filePointer < dis.length()
+  }
+
+  def next(): LogEntry = {
+    val record = readRecord(dis)
+    val logEntry = LogEntry.deserializeFromRecord(record)
+    lastKnownSequenceId = Some(logEntry.sequenceId)
+    logEntry
   }
 }
 

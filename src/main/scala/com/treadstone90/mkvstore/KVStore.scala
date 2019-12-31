@@ -95,8 +95,9 @@ object KVStore {
     val initMemTable = memTableFactory.fromLogStream(iterator)
     val memTableWriter = new MemTableWriterImpl[T](ssTableManager, sliceable, wal, initMemTable, memTableFactory)
 
+    // we need to store lasy known sequence id somewhere.
     new KVStoreImpl[T](ssTableManager, memTableWriter,
-      iterator.lastKnownSequenceId.getOrElse(0L), sliceable)
+      0L, sliceable)
   }
 
   def close(kvStore: KVStore[_]): Unit = {

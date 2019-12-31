@@ -30,6 +30,8 @@ class SSTableFactoryImpl[T](dbPath: String)(implicit val sliceable: Sliceable[T]
     with LogEntryUtils
     with AsScalaConverters {
 
+  val entrySerializer: LogEntry => Record = LogEntry.serializeLogEntry
+
   def writeHeader(bloomFilter: BloomFilter[T], segmentId: Int,
                   writeRandomAccessFile: RandomAccessFile): Int = {
 
@@ -75,7 +77,7 @@ class SSTableFactoryImpl[T](dbPath: String)(implicit val sliceable: Sliceable[T]
 
       if(!prevKey.contains(k.key)) {
         println(s"writing ${k.key} to $ssTableFile")
-        val record = value.makeRecord
+        val record = entrySerializer(value)
         val metadata = RecordEntryMeta(record.size, writeRandomAccessFile.getFilePointer, record.checkSum)
         writeRandomAccessFile.write(serializeRecord(record))
 

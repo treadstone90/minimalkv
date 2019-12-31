@@ -7,6 +7,7 @@ import java.util.zip.CRC32
 trait LogEntryUtils {
   def readRecord(dataInput: DataInput): Record = {
     val recordSize = dataInput.readInt()
+    println(recordSize)
     val checkSum = dataInput.readLong()
     val dataByteArray = new Array[Byte](recordSize)
     dataInput.readFully(dataByteArray)
@@ -37,7 +38,7 @@ trait LogEntryUtils {
 
 case class Record(size: Int, checkSum: Long, data: Array[Byte])
 
-sealed trait LogEntry {
+trait LogEntry {
   def keySize: Int
   def key: Array[Byte]
   def sequenceId: Long
@@ -46,21 +47,6 @@ sealed trait LogEntry {
   val logEntrySize: Int
 
   def writeValue(buffer: ByteBuffer): Unit = {}
-
-  def makeRecord: Record = {
-    val buf = ByteBuffer.allocate(logEntrySize)
-    buf.putInt(keySize)
-    buf.put(key)
-    buf.putLong(sequenceId)
-    buf.putInt(operationType.ordinal())
-    writeValue(buf)
-
-    val crc = new CRC32()
-    val byteArray = buf.array()
-    crc.update(byteArray)
-
-    Record(logEntrySize, crc.getValue, byteArray)
-  }
 }
 
 case class WriteLogEntry(keySize: Int, key: Array[Byte], sequenceId: Long, valueSize: Int, value: Array[Byte])
@@ -105,5 +91,20 @@ object LogEntry {
         byteBuffer.get(valueByteArray)
         WriteLogEntry(keySize, keyByteArray, sequenceId, valueSize, valueByteArray)
     }
+  }
+
+  def serializeLogEntry(logEntry: LogEntry): Record = {
+    val buf = ByteBuffer.allocate(logEntry.logEntrySize)
+    buf.putInt(logEntry.keySize)
+    buf.put(logEntry.key)
+    buf.putLong(logEntry.sequenceId)
+    buf.putInt(logEntry.operationType.ordinal())
+    logEntry.writeValue(buf)
+
+    val crc = new CRC32()
+    val byteArray = buf.array()
+    crc.update(byteArray)
+
+    Record(logEntry.logEntrySize, crc.getValue, byteArray)
   }
 }

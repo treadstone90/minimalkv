@@ -1,97 +1,114 @@
 package com.treadstone90.mkvstore.raft
 
+import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.atomic.AtomicBoolean
 
 import com.google.common.eventbus.EventBus
+import com.treadstone90.mkvstore.WriteAheadLog
+import com.twitter.inject.Logging
 import com.twitter.util.{Duration, Time, Timer, TimerTask}
 
 class FollowerActor(eventBus: EventBus,
                     timer: Timer,
-                    raftState: RaftState,
-                    raftClients: Map[String, RaftClient]) extends Actor {
+                    followerSettings: FollowerSettings,
+                    writeAheadLog: WriteAheadLog[RaftLogEntry],
+                    raftState: RaftState) extends Actor with Logging {
 
   var currentTimerTask: Option[TimerTask] = None
-  val isLocked = new AtomicBoolean(false)
+  val isTimerLocked = new AtomicBoolean(false)
 
   def timeoutTask(): TimerTask = {
-    timer.schedule(Time.now.plus(Duration.fromSeconds(10))) {
-      if(isLocked.compareAndSet(false, true)) {
+    val randomSalt = ThreadLocalRandom.current().nextLong(0, 200)
+    timer.schedule(Time.now.plus(Duration.fromMilliseconds(followerSettings.electionTimeoutMillis + randomSalt))) {
+      if(isTimerLocked.compareAndSet(false, true)) {
         //  here I need to transition into a candidate state
+        // infact I can stop accepting requests to the follower.
         eventBus.post(TransitionStateRequest(Candidate))
-        currentTimerTask = Some(timeoutTask())
-        isLocked.set(false)
+        isTimerLocked.set(false)
       }
     }
   }
 
   def handleAppendEntriesRequest(appendEntriesRequest: AppendEntriesRequest): AppendEntriesResponse = {
-    while(!isLocked.compareAndSet(false, true)) {}
+    while(!isTimerLocked.compareAndSet(false, true)) {}
     currentTimerTask.foreach(_.cancel())
-    val response: AppendEntriesResponse = if(appendEntriesRequest.heartBeatEvent.nonEmpty) {
-      val heartbeatEvent = appendEntriesRequest.heartBeatEvent.get
-      println(s"Received heartbeat from $heartbeatEvent")
 
-      // get a monotonically increasing term.
-      raftState.monotonicUpdate(heartbeatEvent.leaderTerm) match {
-        case None => AppendEntriesResponse(heartbeatEvent.leaderTerm, true)
-        case Some(greaterTerm) => AppendEntriesResponse(greaterTerm, fals)
-      }
-      val currentTerm = raftState.currentTerm()
-      if(currentTerm > heartbeatEvent.leaderTerm) {
-        AppendEntriesResponse(currentTerm, false)
-      } else {
-        // set value to leader's term.
-        if(currentTerm < heartbeatEvent.leaderTerm) {
-          raftState.withExclusiveLock {
-            raftState.setCurrentTerm(heartbeatEvent.leaderTerm)
-          }
+    val response = raftState.monotonicUpdate(appendEntriesRequest.leaderTerm, None) match {
+      case (false, Some((term, candidateId))) =>
+        warn(s"Failed to update term. Current term is $term and voted candidate is $candidateId")
+        AppendEntriesResponse(term, false, raftState.processId)
+      case (true, _) =>
+        info(s"Term from AppendRPC is valid.")
+        if(appendEntriesRequest.entries.isEmpty) {
+          raftState.commitIndex = appendEntriesRequest.leaderCommitIndex
+          AppendEntriesResponse(appendEntriesRequest.leaderTerm, true, raftState.processId)
+        } else {
+          handleAppendEntriesEvent(appendEntriesRequest)
         }
-        AppendEntriesResponse(currentTerm, true)
-      }
 
-
-
-    } else {
-      println("received a non heart beat event.")
-      AppendEntriesResponse(-1, true)
+      //already follower no need to transition
     }
-    isLocked.set(false)
-    timeoutTask()
+    currentTimerTask = Some(timeoutTask())
+    isTimerLocked.set(false)
     response
   }
 
-  def handleRequestVoteRequest(requestVoteRequest: RequestVoteRequest): RequestVoteResponse = {
-    raftState.withExclusiveLock {
-      // if it is greater it is only going to get greater.
-      val currentTerm = raftState.currentTerm()
-      if(currentTerm > requestVoteRequest.term) {
-        RequestVoteResponse(currentTerm, false)
-      } else {
-        // currentTerm is lesser but it can keep on increasing.
-        raftState.setCurrentTerm(requestVoteRequest.term)
-        if(raftState.voteIfEmpty()) {
-          RequestVoteResponse(requestVoteRequest.term, true)
-        } else {
-          // follower aloready voted for another candidate in this term.
-          RequestVoteResponse(requestVoteRequest.term, false)
+
+  def handleAppendEntriesEvent(appendEntriesEvent: AppendEntriesRequest): AppendEntriesResponse = {
+    appendEntriesEvent.prevLogMeta match {
+      case None =>
+        writeAheadLog.appendEntries(appendEntriesEvent.entries)
+        raftState.commitIndex = Math.min(appendEntriesEvent.entries.length - 1, appendEntriesEvent.leaderCommitIndex)
+        AppendEntriesResponse(raftState.currentTerm.get, true, raftState.processId)
+      case Some(prevLogMeta) =>
+        writeAheadLog.get(prevLogMeta.index) match {
+          case None =>
+            AppendEntriesResponse(raftState.currentTerm.get, false, raftState.processId)
+          case Some(walEntry) if walEntry.term != appendEntriesEvent.leaderTerm =>
+            AppendEntriesResponse(raftState.currentTerm.get, false, raftState.processId)
+          case Some(walEntry) =>
+            val startIndex = prevLogMeta.index + 1
+            val endIndex = startIndex + appendEntriesEvent.entries.length
+            if(writeAheadLog.get(startIndex).isEmpty) {
+              writeAheadLog.appendEntries(appendEntriesEvent.entries)
+            } else {
+              appendEntriesEvent.entries.zip(startIndex to endIndex - 1).foreach { case(entry, index) =>
+                val walEntry = writeAheadLog.get(index)
+                if(walEntry.exists(entry => entry.term != appendEntriesEvent.leaderTerm)) {
+                  // keep till index - 1
+                  writeAheadLog.truncate(index - 1)
+                } else if(walEntry.isEmpty) {
+                  writeAheadLog.appendEntry(entry)
+                }
+              }
+            }
+            raftState.commitIndex = Math.min(endIndex, appendEntriesEvent.leaderCommitIndex)
+            AppendEntriesResponse(raftState.currentTerm.get, true, raftState.processId)
         }
-        val voted = raftState.votedFor(requestVoteRequest.term)
-        if(voted.isEmpty || voted.contains(requestVoteRequest.candidateId)) {
-          raftState.setCurrentTerm(requestVoteRequest.term)
-          raftState.voteFor(requestVoteRequest.term, requestVoteRequest.candidateId)
-          RequestVoteResponse(currentTerm, true)
-        } else {
-          RequestVoteResponse(currentTerm, false)
-        }
-
-
-
-      }
     }
   }
 
+  def handleRequestVoteRequest(requestVoteRequest: RequestVoteRequest): RequestVoteResponse = {
+    while(!isTimerLocked.compareAndSet(false, true)) {}
+    currentTimerTask.foreach(_.cancel())
+    // if it is greater it is only going to get greater.
+      val response = raftState.monotonicUpdate(requestVoteRequest.term, Some(requestVoteRequest.candidateId)) match {
+        case (false, Some((term, candidateId))) =>
+          println(s"Failed to update term. Current term is $term and voted candidate is $candidateId")
+          RequestVoteResponse(term, false)
+        case (true, _) =>
+          println(s"Term has been updated and hence vote us granted")
+          RequestVoteResponse(requestVoteRequest.term, true)
+          // already follower no need to transition
+      }
+    currentTimerTask = Some(timeoutTask())
+    isTimerLocked.set(false)
+    response
+  }
+
   override def shutDown(): Unit = {
-    while(!isLocked.compareAndSet(false, true)) {}
+    while(!isTimerLocked.compareAndSet(false, true)) {}
+    info("Attempting to cancel the follower and cancelling the timer")
     currentTimerTask.foreach(_.cancel())
   }
 
@@ -100,4 +117,4 @@ class FollowerActor(eventBus: EventBus,
   }
 }
 
-case class RaftLogEntry(logIndex: Long, logTerm: Int)
+case class FollowerSettings(electionTimeoutMillis: Long)

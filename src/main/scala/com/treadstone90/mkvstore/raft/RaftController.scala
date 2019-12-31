@@ -1,16 +1,16 @@
 package com.treadstone90.mkvstore.raft
 
-import com.twitter.finagle.http.Request
+import com.google.inject.Inject
 import com.twitter.finatra.http.Controller
-import javax.inject.Inject
 
-class RaftController @Inject()() extends Controller {
 
-  post("/appendEntries") { request: Request =>
-    "bar"
+class RaftController @Inject()(stateManager: StateManager) extends Controller {
+
+  post[AppendEntriesRequest, AppendEntriesResponse]("/appendEntries") { request: AppendEntriesRequest =>
+    stateManager.handleAppendEntries(request)
   }
 
-  post("/requestVote") { request: Request =>
-    "bar"
+  post[RequestVoteRequest, RequestVoteResponse]("/requestVote") { request: RequestVoteRequest =>
+    stateManager.handleRequestVote(request)
   }
 }

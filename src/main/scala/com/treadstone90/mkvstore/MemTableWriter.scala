@@ -12,7 +12,7 @@ trait MemTableWriter[T] extends Writer[InternalKey[T]] with Closeable {
 
 class MemTableWriterImpl[T](SSTableManager: SSTableManager[T],
                             sliceable: Sliceable[T],
-                            writeAheadLog: WriteAheadLog,
+                            writeAheadLog: WriteAheadLog[LogEntry],
                             initialMemTable: MemTable[T],
                             memTableFactory: MemTableFactory[T]) extends MemTableWriter[T] {
 

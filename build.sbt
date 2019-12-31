@@ -16,7 +16,12 @@ libraryDependencies ++= Seq(
   "com.twitter" %% "inject-core" % "19.11.0" % "test" classifier "tests",
   "com.twitter" %% "inject-modules" % "19.11.0" % "test" classifier "tests"
 )
-
 libraryDependencies += "org.scalactic" %% "scalactic" % "3.1.0"
 libraryDependencies += "org.scalatest" %% "scalatest" % "3.1.0" % "test"
 libraryDependencies += "org.mockito" % "mockito-scala_2.12" % "1.10.1" % "test"
+
+
+assemblyMergeStrategy in assembly := {
+  case PathList("META-INF", xs @ _*) => MergeStrategy.discard
+  case x => MergeStrategy.first
+}
